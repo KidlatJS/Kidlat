@@ -1,0 +1,54 @@
+{
+  "name": "kidlat",
+  "version": "1.2.0",
+  "description": "A blazing fast, natively-compiled web framework for Node.js built on C++, libuv, and N-API.",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "lib",
+    "prebuilds",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node Test/security-test.js"
+  },
+  "keywords": [
+    "web",
+    "framework",
+    "fast",
+    "performance",
+    "native",
+    "c++",
+    "napi",
+    "libuv",
+    "http",
+    "https",
+    "server",
+    "api",
+    "rest",
+    "routing",
+    "json",
+    "schema",
+    "validation",
+    "ajv",
+    "middleware",
+    "rate-limit",
+    "cors",
+    "cluster",
+    "high-performance",
+    "backend",
+    "microservices",
+    "express-alternative",
+    "fastify-alternative"
+  ],
+  "author": "JoshLei",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "ajv": "^8.20.0",
+    "find-my-way": "^9.9.0",
+    "kidlat": "^1.1.0",
+    "node-gyp-build": "^4.8.4",
+    "pino": "^10.3.1"
+  }
+}
