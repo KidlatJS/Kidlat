@@ -33,6 +33,9 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           package-manager-cache: false
 
+      - name: Update npm
+        run: npm install -g npm@^11.5.1
+
       - name: Show Node.js and npm versions
         run: |
           node --version
