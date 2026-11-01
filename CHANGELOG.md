@@ -1,6 +1,122 @@
 # Changelog
 
-## 2.5.0 — Next
+## 2.6.0 — 2026-11-2
+
+The native addon changed (ABI 7): install 2.6.0 with its matching prebuilt
+binaries, or rebuild from source.
+
+### Features
+
+- **WebSockets.** `app.ws(path, { upgrade, open, message, drain, close, ...options })`
+  on the same port as HTTP, over plain TCP or Kidlat's own TLS. The protocol runs
+  in C++ (RFC 6455):
+  - framing and unmasking
+  - UTF-8 checks, including across fragments and reads
+  - ping/pong and the close handshake
+  - limits and backpressure
+
+  Handlers get whole messages: text as strings, binary as Buffers, each an
+  owned copy.
+  - **Upgrades use the normal pipeline.** The upgrade request goes through
+    routing, `register()` scopes, `onRequest` / `preValidation` / `preHandler`
+    hooks, rate limits and `trustProxy`.
+  - **Refusing an upgrade.** `upgrade(req, res)` may be `async`. Its return
+    value becomes `ws.data`. Sending a response or throwing refuses the
+    upgrade.
+  - **Shared paths.** A path can have both `app.get()` and `app.ws()`. A plain
+    GET to a WebSocket-only path gets `426`.
+  - **Socket API.** `ws.send()` returns `1` sent, `0` buffered or `-1` refused.
+    Also: `bufferedAmount`, `close(code, reason)`, `terminate()`, and
+    `data` / `params` / `query` / `ip` / `protocol` / `isOpen`.
+  - **Native pub/sub.**
+    - `subscribe`, `unsubscribe`, `isSubscribed` and `topics`.
+    - `ws.publish()` sends to everyone except the sender. `app.publish()` sends
+      to everyone.
+    - The frame is built (and compressed) once per publish and copied to each
+      subscriber.
+    - `app.ws.onPublish(fn)` and `app.publishLocal()` connect topics to a
+      broker (Redis, NATS…) across workers and machines.
+  - **permessage-deflate** (RFC 7692) with `compression: true`, without
+    context takeover. It uses the zlib inside Node, so there is still no
+    runtime dependency.
+  - **Shutdown.** `app.close()` and graceful shutdown send `1001` to open
+    sockets and wait for their replies.
+  - **Metrics and logs.** `kidlat_ws_*` metrics, and the upgrade is logged
+    as `101`.
+
+### Security
+
+The [SECURITY](https://github.com/KidlatJS/security) is the full documentation of the security with KidlatJS
+
+Defaults for WebSocket routes, each one configurable:
+
+- **Origin.** When a browser sends `Origin`, it must match the request's own
+  scheme, host and port. This blocks cross-site WebSocket hijacking. `origins`
+  takes an allow-list or `'*'`.
+- **Size limits.** `maxPayload` is 64 KiB, counted across fragments and after
+  decompression, so a zip bomb closes with `1009`. `maxBackpressure` is 1 MiB
+  per socket: a client that stops reading is closed with `1008`, or with
+  `onBackpressureLimit: 'drop'` its messages are refused instead.
+- **Idle clients.** `idleTimeout` is 120 s: a ping goes out halfway, and a
+  silent client is dropped at the deadline.
+- **Message rate.** `messageRate: { max, windowMs }` closes floods with `1008`.
+
+Always enforced:
+
+- Client frames must be masked, with valid reserved bits and opcodes (`1002`).
+- Text and close reasons must be valid UTF-8 (`1007`).
+- Control frames are at most 125 bytes and never fragmented.
+- Close codes must be valid.
+- At most 100 pings per second per socket.
+
+The upgrade itself:
+
+- **Strict validation.** Only an exact HTTP/1.1 `GET` handshake with a
+  well-formed 16-byte key and no body counts as an upgrade. Anything
+  half-valid gets `400`, and a wrong version gets `426`.
+- **Refusals close the connection.** Any HTTP response to an upgrade request
+  closes the connection, and nothing the client sent after it is parsed. This
+  rules out upgrade smuggling.
+
+### Performance
+
+Measured locally on Windows with Node 24, against uWebSockets.js v20.69.0 and
+the same raw client for both:
+
+- **Echo:** 0.99× uWS (78,000 msg/s, 100 connections × 8 in flight).
+- **Broadcast to 1,000 subscribers:** 1.05× uWS (620,000 deliveries/s).
+- **Connection churn:** 0.97× uWS.
+
+WebSocket output produced outside a read is coalesced and written once per
+socket per event-loop turn. Plain HTTP routes are unchanged: an A/B run against
+2.5.0 is within ±1% server CPU per request.
+
+### Fixes
+
+- The parser fuzz harness's reference header-block checker accepted control
+  bytes and DEL in values, which `header_block_ok()` correctly refuses, so the
+  fuzzer stopped on inputs such as a header value containing `0x7F`. It now
+  agrees with the native check. Product code is unchanged; this affected only
+  the 2.5 fuzzing checklist item.
+
+### Testing
+
+New tests:
+
+- `test/ws.test.js`, `test/ws-limits.test.js` and `test/ws-pubsub.test.js`.
+- WebSocket security probes: hijacking, upgrade smuggling, fragment and ping
+  floods.
+- Property tests: frame round-trips, and pub/sub against a Set model.
+
+New tools:
+
+- A frame-parser self-test and fuzz target (`fuzz\run-windows.cmd selftest` and
+  `ws`, `fuzz/build.sh`).
+- An Autobahn TestSuite runner (`scripts/autobahn.mjs`).
+- A soak mode (`soak.mjs --ws`).
+- `benchmarks/ws-load.mjs`.
+
+## 2.5.0 — 2026-10-28
 
 The native addon changed (ABI 6): install 2.5.0 with its matching prebuilt
 binaries, or rebuild from source.

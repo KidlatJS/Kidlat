@@ -1,0 +1,85 @@
+# Example Prometheus alerting rules for a Kidlat service.
+# Assumes the scrape job is called "kidlat" and the app runs with { metrics: true }.
+# Thresholds are starting points - tune them to your traffic, then fire each
+# alert once in staging to make sure it reaches whoever is on call.
+# What to do when each one fires: docs/RUNBOOK.md.
+
+groups:
+  - name: kidlat
+    rules:
+      - alert: KidlatDown
+        expr: up{job="kidlat"} == 0
+        for: 1m
+        labels: { severity: page }
+        annotations:
+          summary: "Kidlat instance {{ $labels.instance }} is not answering scrapes"
+
+      - alert: KidlatHigh5xxRate
+        expr: |
+          sum by (instance) (rate(kidlat_http_requests_total{job="kidlat",status=~"5.."}[5m]))
+            / sum by (instance) (rate(kidlat_http_requests_total{job="kidlat"}[5m])) > 0.01
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "More than 1% of responses are 5xx on {{ $labels.instance }}"
+
+      - alert: KidlatHighLatencyP99
+        expr: |
+          histogram_quantile(0.99,
+            sum by (instance, le) (rate(kidlat_http_request_duration_seconds_bucket{job="kidlat"}[5m]))) > 0.5
+        for: 10m
+        labels: { severity: warn }
+        annotations:
+          summary: "p99 latency above 500 ms on {{ $labels.instance }}"
+
+      - alert: KidlatEventLoopBlocked
+        expr: nodejs_eventloop_delay_seconds{job="kidlat",quantile="0.99"} > 0.1
+        for: 5m
+        labels: { severity: warn }
+        annotations:
+          summary: "Event loop delayed >100 ms (p99) on {{ $labels.instance }} — CPU-heavy or blocking code"
+
+      - alert: KidlatRestarted
+        expr: changes(process_start_time_seconds{job="kidlat"}[15m]) > 0
+        labels: { severity: warn }
+        annotations:
+          summary: "Kidlat process on {{ $labels.instance }} restarted"
+
+      - alert: KidlatMemoryGrowth
+        expr: delta(process_resident_memory_bytes{job="kidlat"}[6h]) > 200 * 1024 * 1024
+        for: 30m
+        labels: { severity: warn }
+        annotations:
+          summary: "RSS grew more than 200 MB in 6 h on {{ $labels.instance }} — possible leak"
+
+      # Set the threshold to ~80% of your maxConnections (default 16384).
+      - alert: KidlatConnectionsNearLimit
+        expr: kidlat_connections{job="kidlat"} > 13000
+        for: 5m
+        labels: { severity: warn }
+        annotations:
+          summary: "{{ $value }} open connections on {{ $labels.instance }} — new ones get 503 at maxConnections"
+
+      - alert: KidlatManyTimeouts
+        expr: sum by (instance) (rate(kidlat_http_requests_total{job="kidlat",status="408"}[5m])) > 1
+        for: 10m
+        labels: { severity: warn }
+        annotations:
+          summary: "Requests timing out (408) on {{ $labels.instance }} — slow clients, an attack, or requestTimeout too low"
+
+      - alert: KidlatWsBackpressureCloses
+        expr: sum by (instance) (rate(kidlat_ws_backpressure_total{job="kidlat",action="close"}[5m])) > 0.1
+        for: 10m
+        labels: { severity: warn }
+        annotations:
+          summary: "WebSocket clients closed for falling behind (1008) on {{ $labels.instance }}"
+
+      # More than 20% of WebSocket closes without a close frame (1006).
+      - alert: KidlatWsAbnormalCloses
+        expr: |
+          sum by (instance) (rate(kidlat_ws_closes_total{job="kidlat",code="1006"}[10m]))
+            / sum by (instance) (rate(kidlat_ws_closes_total{job="kidlat"}[10m])) > 0.2
+        for: 15m
+        labels: { severity: warn }
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of WebSocket closes are abnormal (1006) on {{ $labels.instance }} — check proxy idle timeouts"

@@ -1,0 +1,85 @@
+name: JS | Publish Kidlat to NPMJS
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build, test, and publish
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout release
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+
+      - name: Show Node.js and npm versions
+        run: |
+          node --version
+          npm --version
+
+      - name: Verify package and release version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const releaseVersion = process.env.RELEASE_TAG.replace(/^v/, '');
+
+          if (pkg.name !== 'kidlat') {
+            throw new Error(`Expected package "kidlat", found "${pkg.name}".`);
+          }
+
+          if (pkg.private) {
+            throw new Error('package.json marks this package as private.');
+          }
+
+          if (pkg.version !== releaseVersion) {
+            throw new Error(
+              `Release tag ${process.env.RELEASE_TAG} does not match package version ${pkg.version}.`
+            );
+          }
+
+          console.log(`Publishing ${pkg.name}@${pkg.version}`);
+          NODE
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Smoke test the prebuilt binary
+        run: |
+          node --input-type=module -e "
+            const m = await import('./index.js');
+            if (typeof m.Kidlat !== 'function') throw new Error('Kidlat export missing');
+            const app = new m.Kidlat();
+            if (typeof app.ws !== 'function') throw new Error('app.ws missing');
+            console.log('kidlat loads; native ABI OK');
+          "
+
+      - name: Preview package contents
+        run: npm pack --dry-run
+
+      - name: Publish with provenance
+        run: npm publish --provenance --access public --tag latest

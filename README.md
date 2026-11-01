@@ -15,6 +15,7 @@ Kidlat bypasses Node's `http` module entirely. TCP sockets, TLS termination and 
 - **Native TLS/HTTPS:** terminated in C++; TLS 1.2+ with forward-secret AEAD ciphers only, full certificate chains, ALPN.
 - **JSON Schema:** validate `body`, `querystring`, `params` and `headers` (with type coercion), and serialize responses from a schema that also acts as an allow-list.
 - **Streaming:** Node streams, web streams and async iterables, with real backpressure — and released the moment the client disconnects.
+- **WebSockets in C++:** `app.ws()` on the same port, over HTTP or HTTPS, with native pub/sub (a broadcast is framed once), permessage-deflate, backpressure limits, Origin checks and idle pings — on par with uWebSockets.js in our echo and broadcast benchmarks.
 - **Graceful shutdown:** drain from the load balancer, finish in-flight requests, clean up, exit — one call.
 - **Production-ready endpoints:** `/health`, `/ready` with your own checks, and Prometheus `/metrics`.
 - **Built-in CORS & rate limiting** (app-wide, per scope or per route), hooks, middleware, scoped plugins.
@@ -34,6 +35,12 @@ npm install kidlat
 ```
 
 Prebuilt binaries ship for Windows x64, macOS (arm64 and x64) and Linux x64 and arm64 (glibc and musl/Alpine), so no compiler is needed on those platforms.
+
+## 📚 Documentation
+
+- [Getting started](https://github.com/KidlatJS/Kidlat/blob/main/documentation/GETTING_STARTED.md) — install, a first server, validation, errors and a WebSocket in about ten minutes.
+- [Guides](https://github.com/KidlatJS/Kidlat/blob/main/documentation/Guides.md) — the full documentation of Kidlat, one page per topic.
+- [Runbook](https://github.com/KidlatJS/Kidlat/blob/main/documentation/RUNBOOK.md) — running Kidlat in production: load balancers, alerts, rollbacks, diagnostics.
 
 ## 🛠️ Quick Start
 
@@ -158,8 +165,8 @@ app.post('/api/users', {
             required: ['username', 'age'],
             properties: {
                 username: { type: 'string', minLength: 3 },
-                age: { type: 'integer', minimum: 18 },
-                role: { type: 'string', enum: ['user', 'admin'], default: 'user' }
+                age:      { type: 'integer', minimum: 18 },
+                role:     { type: 'string', enum: ['user', 'admin'], default: 'user' }
             },
             additionalProperties: false
         },
@@ -219,6 +226,21 @@ app.get('/events', (req, res) => res.stream((async function* () {
 ```
 
 If a stream fails halfway, Kidlat aborts the connection, so the client never mistakes a truncated body for a complete one. When the client disconnects, the source is stopped and released straight away.
+
+### WebSockets
+
+```javascript
+app.ws('/chat/:room', {
+    upgrade: (req) => ({ user: req.headers['x-user'] }), // hooks and rate limits already ran
+    open: (ws) => ws.subscribe(ws.params.room),
+    message: (ws, msg, isBinary) => ws.publish(ws.params.room, msg, isBinary),
+    close: (ws, code) => {},
+});
+
+app.publish('announcements', 'hello everyone'); // from anywhere
+```
+
+Framing, UTF-8 checks, ping/pong, the close handshake, backpressure and pub/sub run in C++; handlers get whole messages. Safe defaults: same-origin `Origin` check, 64 KiB messages, 1 MiB per-socket backlog, idle pings, compression off (`compression: true` for permessage-deflate). See the [WebSockets guide](https://github.com/KidlatJS/Kidlat/blob/main/documentation/guides/09-websockets.md).
 
 ### Multi-core Clustering
 
@@ -306,32 +328,74 @@ For full control, `await app.close()` does just the middle part: stop accepting,
 | `metrics` | off | `true` or `{ path, allow, buckets, exclude }` |
 | `trustProxy`, `ignoreTrailingSlash`, `genReqId`, `reusePort`, `backlog` | | |
 
+## 🤔 Why Kidlat?
+
+Kidlat is a full framework that runs about as fast as uWebSockets.js. It has schemas, hooks, scopes, cookies, forms, rate limiting, metrics and WebSockets built in, installs from npm, and has no runtime dependencies.
+
+**Same machine, same routes** (`node benchmarks/compare.mjs`, 2026-10-29, Windows, Node 24, 100 connections, 2 rounds × 6 s):
+
+| Scenario | Kidlat | uWS | hyper-express | Fastify |
+|---|---|---|---|---|
+| GET text, pipelining 10 | 63.7k req/s | 63.7k | 69.5k | 24.6k |
+| GET `/user/:id`, pipelining 10 | 70.6k | 77.3k | 67.9k | 30.4k |
+| POST `/echo` JSON, pipelining 10 | **71.5k** | 61.8k | 38.3k | 15.4k |
+| GET JSON + 4 headers, pipelining 10 | 66.3k | 67.6k | 59.5k | 29.0k |
+| GET text, no pipelining | **39.6k** | 38.8k | 26.4k | 18.7k |
+| GET JSON + response schema | **32.2k** | – | – | 17.5k |
+| POST + body validation | **31.2k** | – | – | 13.8k |
+| Server CPU per request (POST `/echo`, pipelining 10) | **14.8 µs** | 16.2 µs | 26.4 µs | 67.6 µs |
+| Memory under load | **~57 MB** | ~53 MB | ~62–126 MB | ~80–103 MB |
+
+uWS and hyper-express have no schema support, so they don't run the last two scenarios. For WebSockets, `node benchmarks/ws-load.mjs` puts Kidlat at 0.99× uWS on echo and 1.05× on broadcast to 1,000 subscribers. CI and Nightly fail a build that drops below Fastify's throughput or rises above 1.10× uWS's CPU per request.
+
+| Compared with | Choose Kidlat because… | Choose the other when… |
+|---|---|---|
+| **Express / Koa** | Several times the throughput and less memory. Validation, serialization, cookies, forms, CORS, rate limiting, security headers, metrics, graceful shutdown and WebSockets are built in. No dependency tree to audit. | You rely on their middleware ecosystem or on `node:http` compatibility. |
+| **Fastify** | A similar model (hooks, `register()` scopes, JSON Schema) at 2–4× the requests and about half the CPU. | You need HTTP/2 at the app, or one of Fastify's many plugins. |
+| **uWebSockets.js** | The same performance class, plus a framework on top. It installs from npm with prebuilt binaries for seven platforms. Requests and messages are owned copies, so handlers can keep them. The parser is strict and smuggling-tested, and WebSocket routes check Origin and limit backpressure by default. It's MIT-licensed. | You want the thinnest possible layer and will build the framework parts yourself. |
+| **hyper-express** | Level on simple GETs, about 1.9× on JSON bodies, without uWS's installation and lifetime rules underneath. | You want an Express-style API on uWS specifically. |
+
+**Things to weigh:**
+- Kidlat speaks HTTP/1.1. HTTP/2 is planned; until then, put it behind a proxy or load balancer for HTTP/2 and HTTP/3.
+- It isn't a drop-in for `node:http`.
+- It needs a prebuilt binary for your platform, or a C++ toolchain to build one.
+- 2.x is new (October 2026), next to years of production use for Express and Fastify.
+
 ## 📊 Benchmarks
 
-Every Kidlat release on the same machine, routes and load: one server process on a 12-thread Windows machine (Node 24), 100 connections, median of at least 6 rounds in random order. The load generator runs on the same machine as the server, so absolute numbers are modest; compare the versions with each other.
+The last three releases, measured together on the same machine with the same routes and load (2026-10-29):
+- one server process on a 12-thread Windows machine (Node 24)
+- 100 connections from 2 client workers
+- median of 12 rounds of 6 s each, versions and scenarios in random order
+
+The load generator runs on the same machine as the server, so absolute numbers are modest. Compare the versions with each other.
 
 **Requests per second** (higher is better)
 
-| Scenario | Kidlat 1.x | Kidlat 2.2 | Kidlat 2.3 | **Kidlat 2.4** |
-|---|---|---|---|---|
-| `GET /` → JSON, pipelining 10 | 11.0k | 37.8k | 51.9k | **50.1k** |
-| `GET /user/:id`, pipelining 10 | 11.4k | 42.3k | 48.1k | **44.7k** |
-| `POST /echo` (parse and echo JSON), pipelining 10 | 9.5k | 28.4k | 25.2k | **33.4k** |
-| `GET /` → JSON | 7.8k | 10.9k | 12.6k | **12.4k** |
-| `GET /user/:id` | 7.2k | 10.8k | 9.7k | **10.7k** |
-| `POST /echo` (parse and echo JSON) | 7.1k | 8.4k | 7.6k | **9.9k** |
+| Scenario | Kidlat 2.4 | Kidlat 2.5 | **Kidlat 2.6** |
+|---|---|---|---|
+| `GET /` → JSON, pipelining 10 | 67.1k | 67.5k | **69.0k** |
+| `GET /user/:id`, pipelining 10 | 67.7k | 65.1k | **64.4k** |
+| `POST /echo` (parse and echo JSON), pipelining 10 | 68.6k | 66.2k | **68.6k** |
+| `GET /` → JSON | 34.7k | 33.2k | **33.5k** |
+| `GET /user/:id` | 33.8k | 34.9k | **35.5k** |
+| `POST /echo` (parse and echo JSON) | 27.0k | 27.7k | **27.3k** |
 
 **Server CPU per request, pipelining 10** (lower is better — the steadier measure on a shared machine)
 
-| Scenario | Kidlat 1.x | Kidlat 2.2 | Kidlat 2.3 | **Kidlat 2.4** |
-|---|---|---|---|---|
-| `GET /` → JSON | 74.1 µs | 17.4 µs | 16.2 µs | **16.5 µs** |
-| `GET /user/:id` | 66.7 µs | 17.6 µs | 17.1 µs | **17.5 µs** |
-| `POST /echo` (parse and echo JSON) | 93.2 µs | 27.0 µs | 31.7 µs | **21.8 µs** |
-| Memory under load | 207 MB | 68 MB | 68 MB | **68 MB** |
-| Crashes | 10 of 36 runs | none | none | **none** |
+| Scenario | Kidlat 2.4 | Kidlat 2.5 | **Kidlat 2.6** |
+|---|---|---|---|
+| `GET /` → JSON | 15.3 µs | 15.4 µs | **15.4 µs** |
+| `GET /user/:id` | 15.5 µs | 16.2 µs | **16.2 µs** |
+| `POST /echo` (parse and echo JSON) | 15.4 µs | 15.6 µs | **15.4 µs** |
+| Memory under load | 59 MB | 59 MB | **60 MB** |
+| Crashes | none in 72 runs | none in 72 runs | **none in 72 runs** |
 
-Kidlat 2.x serves 3.5–4.5× the requests of 1.x at pipelining 10, using about a quarter of the CPU per request and a third of the memory. 2.4 serves about 30% more JSON `POST` requests than 2.3 at about 30% less CPU each; on `GET` routes 2.3 and 2.4 are within run-to-run variation, with the same CPU per request. Kidlat 1.x can crash under load — upgrade to 2.x. Independent Linux results are published by [KidlatJS/benchmarks](https://github.com/KidlatJS/benchmarks).
+On these plain routes the three releases are within run-to-run variation of each other: medians differ by at most 4%, and each one's middle-half range overlaps the others'. Their gains are elsewhere:
+- **2.5** made custom response headers and the built-in rate limiter and CORS cheaper, which these routes don't use.
+- **2.6** adds WebSockets without changing plain HTTP. In 2.6's own benchmark (`benchmarks/ws-load.mjs`), echo runs at 0.99× uWebSockets.js and a broadcast to 1,000 subscribers at 1.05×.
+
+Earlier releases were measured on 2026-10-16, a run this machine no longer reproduces, so they aren't in the tables. In that run, 2.x served 3.5–4.5× the requests of 1.x at pipelining 10, with about a quarter of the CPU per request and a third of the memory. Kidlat 1.x can also crash under load, so upgrade to 2.x. Independent Linux results are published by [KidlatJS/benchmarks](https://github.com/KidlatJS/benchmarks).
 
 A benchmark gate runs nightly and on every release tag in CI, and fails the build if a change makes Kidlat slower.
 
@@ -365,6 +429,8 @@ Most apps need no changes. Check these:
 
 The [CHANGELOG](https://github.com/KidlatJS/Kidlat/blob/main/CHANGELOG.md) has the full list with what to do for each.
 
+## 🛡️ Security
 The [SECURITY](https://github.com/KidlatJS/security) Reproducible security tests for Kidlat: parser fuzzing, request-smuggling probes, a soak test and a TLS scan. Every run records the exact environment, inputs and raw results in [results/](https://github.com/KidlatJS/security/tree/main/results).
+
 ## 📄 License
 Licensed under [MIT](https://github.com/kidlatjs/kidlat/blob/HEAD/LICENSE).
